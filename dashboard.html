@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html><head><title>fa3 dashboard</title><meta charset="utf-8">
+<style>body{font-family:monospace;margin:2em}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:4px 8px}th{background:#f0f0f0}.g{color:red}</style>
+</head><body>
+<h2>fa3 — beast ingest fan-out</h2>
+<div id="stats"></div>
+<h3>Feeders</h3>
+<table><thead><tr><th>Addr</th><th>UUID</th><th>RecvID</th><th>Msgs</th><th>Bytes</th><th>Uptime</th><th>Status</th></tr></thead><tbody id="tb"></tbody></table>
+<script>
+async function refresh(){
+  const s=await(await fetch('/api/stats')).json();
+  document.getElementById('stats').textContent=`Feeders: ${s.input.feeders} | Beast subs: ${s.beast_out.subscribers} | Garbage subs: ${s.garbage_out.subscribers} | Uptime: ${Math.floor(s.uptime_seconds)}s`;
+  const f=await(await fetch('/api/feeders')).json();
+  const tb=document.getElementById('tb');
+  tb.innerHTML=f.feeders.map(x=>`<tr><td>${x.addr}</td><td>${x.uuid||'-'}</td><td>${x.receiver_id}</td><td>${x.msg_count}</td><td>${x.bytes_recv}</td><td>${Math.floor(x.uptime_sec)}s</td><td class="${x.garbage?'g':''}">${x.garbage?'GARBAGE':'ok'}</td></tr>`).join('');
+}
+refresh();setInterval(refresh,2000);
+</script></body></html>
