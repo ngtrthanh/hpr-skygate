@@ -136,25 +136,28 @@ pub fn decode_cpr_relative(
     } else {
         360.0 / (if fflag { 59.0 } else { 60.0 })
     };
+    let frac_lat = cprlat as f64 / 131072.0;
+    let frac_lon = cprlon as f64 / 131072.0;
 
-    let j = (reflat / air_dlat).floor() + ((reflat % air_dlat) / air_dlat - cprlat as f64 / 131072.0 + 0.5).floor();
-    let rlat = air_dlat * (j + cprlat as f64 / 131072.0);
+    // Positive modulo (matches readsb cprModDouble)
+    let reflat_mod = ((reflat % air_dlat) + air_dlat) % air_dlat;
+
+    let j = (reflat / air_dlat).floor() + (0.5 + reflat_mod / air_dlat - frac_lat).floor();
+    let rlat = air_dlat * (j + frac_lat);
 
     // Check latitude range
     if rlat < -90.0 || rlat > 90.0 { return None; }
-
-    // Check latitude is within reasonable distance from reference
-    if (rlat - reflat).abs() > (air_dlat * 1.5) { return None; }
+    if (rlat - reflat).abs() > (air_dlat / 2.0) { return None; }
 
     let dlon = cpr_dlon(rlat, fflag, surface);
-    let m = (reflon / dlon).floor() + ((reflon % dlon) / dlon - cprlon as f64 / 131072.0 + 0.5).floor();
-    let mut rlon = dlon * (m + cprlon as f64 / 131072.0);
+    let reflon_mod = ((reflon % dlon) + dlon) % dlon;
 
-    // Normalize
-    rlon -= ((rlon + 180.0) / 360.0).floor() * 360.0;
+    let m = (reflon / dlon).floor() + (0.5 + reflon_mod / dlon - frac_lon).floor();
+    let mut rlon = dlon * (m + frac_lon);
+    if rlon > 180.0 { rlon -= 360.0; }
 
     // Check longitude is reasonable
-    if (rlon - reflon).abs() > (dlon * 1.5) { return None; }
+    if (rlon - reflon).abs() > (dlon / 2.0) { return None; }
 
     Some((rlat, rlon))
 }

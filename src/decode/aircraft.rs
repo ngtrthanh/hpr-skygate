@@ -5,7 +5,7 @@ use std::collections::HashMap as StdHashMap;
 use super::cpr;
 use super::mode_s::ModeS;
 
-const CPR_PAIR_TIMEOUT: f64 = 2.0;  // tight: only pair frames likely from same receiver
+const CPR_PAIR_TIMEOUT: f64 = 10.0;  // seconds between even/odd for global decode
 const SPEED_MAX_KT: f64 = 900.0;     // max plausible speed for speed check
 const STALE_TIMEOUT: f64 = 60.0;     // remove aircraft after 60s no message
 
@@ -212,9 +212,8 @@ impl Store {
     fn try_position(&mut self, icao: u32, t: f64) {
         let ac = match self.map.get_mut(&icao) { Some(a) => a, None => return };
 
-        // Always try relative decode first if we have a confirmed position
+        // Try relative decode first if we have a confirmed position
         if ac.prev_pos_time > 0.0 {
-            // Use the most recent CPR frame (any receiver) for relative decode
             let (cpr_lat, cpr_lon, is_odd) = match (ac.cpr_even, ac.cpr_odd) {
                 (Some(e), Some(o)) => if e.2 > o.2 { (e.0, e.1, false) } else { (o.0, o.1, true) },
                 (Some(e), None) => (e.0, e.1, false),
@@ -222,7 +221,7 @@ impl Store {
                 _ => return,
             };
             if let Some((lat, lon)) = cpr::decode_cpr_relative(
-                ac.prev_lat, ac.prev_lon, cpr_lat, cpr_lon, is_odd, !ac.on_ground
+                ac.prev_lat, ac.prev_lon, cpr_lat, cpr_lon, is_odd, ac.on_ground
             ) {
                 if speed_check(ac, lat, lon, t) {
                     ac.lat = Some(lat);
@@ -236,74 +235,31 @@ impl Store {
                     return;
                 }
             }
-            // Relative failed — reset if stale
-            if t - ac.prev_pos_time > 30.0 {
-                ac.prev_pos_time = 0.0;
-                ac.prev_lat = 0.0;
-                ac.prev_lon = 0.0;
-            }
+            // Relative failed — don't fall through, wait for next frame
             return;
         }
 
-        // Global decode: find a per-receiver slot with both even+odd within timeout
-        let mut best_pair: Option<(u32, u32, u32, u32, bool)> = None;
-        for slot in ac.cpr_slots.values() {
-            if let (Some(e), Some(o)) = (slot.even, slot.odd) {
-                if (e.2 - o.2).abs() <= CPR_PAIR_TIMEOUT {
-                    let fflag = o.2 > e.2;
-                    best_pair = Some((e.0, e.1, o.0, o.1, fflag));
-                    break;
-                }
-            }
-        }
-        let (elat, elon, olat, olon, fflag) = match best_pair {
-            Some(p) => p,
-            None => return,
+        // Global decode: need even+odd pair from same receiver within timeout
+        let (even, odd) = match (ac.cpr_even, ac.cpr_odd) {
+            (Some(e), Some(o)) => (e, o),
+            _ => return,
         };
-        if let Some((lat, lon)) = cpr::decode_cpr_airborne(elat, elon, olat, olon, fflag) {
-            // First global decode: store as candidate, don't accept yet
-            if ac.prev_pos_time == 0.0 && ac.prev_lat == 0.0 && ac.prev_lon == 0.0 {
-                // First candidate — store but don't publish
-                ac.prev_lat = lat;
-                ac.prev_lon = lon;
-                ac.prev_pos_time = -1.0; // marker: "have candidate, not confirmed"
-                return;
-            }
-            if ac.prev_pos_time == -1.0 {
-                // Second global decode: check if it agrees with candidate
-                let dist = distance_nm(ac.prev_lat, ac.prev_lon, lat, lon);
-                if dist < 50.0 {
-                    // Confirmed! Accept this position
-                    ac.lat = Some(lat);
-                    ac.lon = Some(lon);
-                    ac.seen_pos = t;
-                    ac.prev_lat = lat;
-                    ac.prev_lon = lon;
-                    ac.prev_pos_time = t;
-                    ac.trace.push(TracePoint { ts: t, lat, lon, alt: ac.alt_baro, gs: ac.gs });
-                    if ac.trace.len() > 1000 { ac.trace.remove(0); }
-                } else {
-                    // Disagreement — reset, try again with this as new candidate
-                    ac.prev_lat = lat;
-                    ac.prev_lon = lon;
-                    // stays at -1.0
-                }
-                return;
-            }
-            // Already have confirmed position — speed check
-            if speed_check(ac, lat, lon, t) {
-                ac.lat = Some(lat);
-                ac.lon = Some(lon);
-                ac.seen_pos = t;
-                ac.prev_lat = lat;
-                ac.prev_lon = lon;
-                ac.prev_pos_time = t;
-                ac.trace.push(TracePoint { ts: t, lat, lon, alt: ac.alt_baro, gs: ac.gs });
-                if ac.trace.len() > 1000 { ac.trace.remove(0); }
-            }
+        // Same receiver required (skip if either is 0/unknown)
+        if even.3 != 0 && odd.3 != 0 && even.3 != odd.3 { return; }
+        if (even.2 - odd.2).abs() > CPR_PAIR_TIMEOUT { return; }
+        let fflag = odd.2 > even.2;
+        if let Some((lat, lon)) = cpr::decode_cpr_airborne(even.0, even.1, odd.0, odd.1, fflag) {
+            // Accept first global decode (CPR math is unambiguous for airborne)
+            ac.lat = Some(lat);
+            ac.lon = Some(lon);
+            ac.seen_pos = t;
+            ac.prev_lat = lat;
+            ac.prev_lon = lon;
+            ac.prev_pos_time = t;
+            ac.trace.push(TracePoint { ts: t, lat, lon, alt: ac.alt_baro, gs: ac.gs });
+            if ac.trace.len() > 1000 { ac.trace.remove(0); }
         }
     }
-
     pub fn reap_stale(&mut self) {
         let t = now_s();
         self.map.retain(|_, ac| t - ac.seen < STALE_TIMEOUT);
