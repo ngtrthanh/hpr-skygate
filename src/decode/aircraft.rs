@@ -84,6 +84,8 @@ pub struct Aircraft {
     prev_lat: f64,
     prev_lon: f64,
     prev_pos_time: f64,
+    pos_reliable_odd: f32,
+    pos_reliable_even: f32,
 }
 
 impl Aircraft {
@@ -102,6 +104,7 @@ impl Aircraft {
             trace: Vec::new(),
             cpr_even: None, cpr_odd: None, cpr_slots: std::collections::HashMap::new(),
             prev_lat: 0.0, prev_lon: 0.0, prev_pos_time: 0.0,
+            pos_reliable_odd: 0.0, pos_reliable_even: 0.0,
         }
     }
 }
@@ -212,16 +215,14 @@ impl Store {
     fn try_position(&mut self, icao: u32, t: f64) {
         let ac = match self.map.get_mut(&icao) { Some(a) => a, None => return };
 
-        // Try relative decode first if we have a confirmed position
+        // Try relative decode first if we have an internal position
         if ac.prev_pos_time > 0.0 {
-            // Use most recent CPR frame with valid receiver_id
             let (cpr_lat, cpr_lon, is_odd) = match (ac.cpr_even, ac.cpr_odd) {
                 (Some(e), Some(o)) => {
-                    // Prefer the more recent frame, but only if it has valid receiver_id
                     if e.2 > o.2 && e.3 != 0 { (e.0, e.1, false) }
                     else if o.3 != 0 { (o.0, o.1, true) }
                     else if e.3 != 0 { (e.0, e.1, false) }
-                    else { return; } // both rid=0, skip
+                    else { return; }
                 }
                 (Some(e), None) => if e.3 != 0 { (e.0, e.1, false) } else { return; },
                 (None, Some(o)) => if o.3 != 0 { (o.0, o.1, true) } else { return; },
@@ -231,18 +232,22 @@ impl Store {
                 ac.prev_lat, ac.prev_lon, cpr_lat, cpr_lon, is_odd, ac.on_ground
             ) {
                 if speed_check(ac, lat, lon, t) {
-                    ac.lat = Some(lat);
-                    ac.lon = Some(lon);
-                    ac.seen_pos = t;
                     ac.prev_lat = lat;
                     ac.prev_lon = lon;
                     ac.prev_pos_time = t;
-                    ac.trace.push(TracePoint { ts: t, lat, lon, alt: ac.alt_baro, gs: ac.gs });
-                    if ac.trace.len() > 1000 { ac.trace.remove(0); }
+                    // Increment reliability on consistent relative decode
+                    if is_odd { ac.pos_reliable_odd += 1.0; } else { ac.pos_reliable_even += 1.0; }
+                    // Publish if reliable
+                    if ac.pos_reliable_odd >= 2.0 && ac.pos_reliable_even >= 2.0 {
+                        ac.lat = Some(lat);
+                        ac.lon = Some(lon);
+                        ac.seen_pos = t;
+                        ac.trace.push(TracePoint { ts: t, lat, lon, alt: ac.alt_baro, gs: ac.gs });
+                        if ac.trace.len() > 1000 { ac.trace.remove(0); }
+                    }
                     return;
                 }
             }
-            // Relative failed — don't fall through, wait for next frame
             return;
         }
 
@@ -262,15 +267,43 @@ impl Store {
             None => return,
         };
         if let Some((lat, lon)) = cpr::decode_cpr_airborne(elat, elon, olat, olon, fflag) {
-            // Accept first global decode (CPR math is unambiguous for airborne)
-            ac.lat = Some(lat);
-            ac.lon = Some(lon);
-            ac.seen_pos = t;
+            if !speed_check(ac, lat, lon, t) {
+                // Speed check failed — decrement reliability
+                if fflag { ac.pos_reliable_odd -= 1.0; } else { ac.pos_reliable_even -= 1.0; }
+                if ac.pos_reliable_odd < 0.0 || ac.pos_reliable_even < 0.0 {
+                    ac.prev_pos_time = 0.0; ac.prev_lat = 0.0; ac.prev_lon = 0.0;
+                    ac.pos_reliable_odd = 0.0; ac.pos_reliable_even = 0.0;
+                    ac.lat = None; ac.lon = None;
+                }
+                return;
+            }
+
+            // Fast-track: if within 50km of last reliable position, trust immediately
+            if ac.lat.is_some() {
+                let dist = distance_nm(ac.lat.unwrap(), ac.lon.unwrap(), lat, lon);
+                if dist < 27.0 { // 50km ≈ 27nm
+                    ac.pos_reliable_odd = 2.0_f32.max(ac.pos_reliable_odd);
+                    ac.pos_reliable_even = 2.0_f32.max(ac.pos_reliable_even);
+                }
+            }
+
+            // Store internal position
             ac.prev_lat = lat;
             ac.prev_lon = lon;
             ac.prev_pos_time = t;
-            ac.trace.push(TracePoint { ts: t, lat, lon, alt: ac.alt_baro, gs: ac.gs });
-            if ac.trace.len() > 1000 { ac.trace.remove(0); }
+
+            // Increment reliability counter (both — global uses both even+odd)
+            ac.pos_reliable_odd += 1.0;
+            ac.pos_reliable_even += 1.0;
+
+            // Publish only when reliable (both counters ≥ 2)
+            if ac.pos_reliable_odd >= 2.0 && ac.pos_reliable_even >= 2.0 {
+                ac.lat = Some(lat);
+                ac.lon = Some(lon);
+                ac.seen_pos = t;
+                ac.trace.push(TracePoint { ts: t, lat, lon, alt: ac.alt_baro, gs: ac.gs });
+                if ac.trace.len() > 1000 { ac.trace.remove(0); }
+            }
         }
     }
     pub fn reap_stale(&mut self) {
