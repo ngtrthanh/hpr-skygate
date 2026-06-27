@@ -5,7 +5,7 @@ use std::collections::HashMap as StdHashMap;
 use super::cpr;
 use super::mode_s::ModeS;
 
-const CPR_PAIR_TIMEOUT: f64 = 30.0;  // seconds between even/odd for global decode
+const CPR_PAIR_TIMEOUT: f64 = 2.0;  // tight: only pair frames likely from same receiver
 const SPEED_MAX_KT: f64 = 900.0;     // max plausible speed for speed check
 const STALE_TIMEOUT: f64 = 60.0;     // remove aircraft after 60s no message
 
@@ -221,9 +221,16 @@ impl Store {
                     return;
                 }
             }
+            // Relative failed — don't fall through to global if we already have a position
+            // (relative failure means speed check failed = probably stale/wrong prior)
+            // Reset prior and let next global pair re-establish
+            if t - ac.prev_pos_time > 30.0 {
+                ac.prev_pos_time = 0.0;
+            }
+            return;
         }
 
-        // Fall back to global decode if no prior position or relative failed
+        // Global decode: need even+odd pair
         let (even, odd) = match (ac.cpr_even, ac.cpr_odd) {
             (Some(e), Some(o)) => (e, o),
             _ => return,
@@ -231,6 +238,36 @@ impl Store {
         if (even.2 - odd.2).abs() > CPR_PAIR_TIMEOUT { return; }
         let fflag = odd.2 > even.2;
         if let Some((lat, lon)) = cpr::decode_cpr_airborne(even.0, even.1, odd.0, odd.1, fflag) {
+            // First global decode: store as candidate, don't accept yet
+            if ac.prev_pos_time == 0.0 && ac.prev_lat == 0.0 && ac.prev_lon == 0.0 {
+                // First candidate — store but don't publish
+                ac.prev_lat = lat;
+                ac.prev_lon = lon;
+                ac.prev_pos_time = -1.0; // marker: "have candidate, not confirmed"
+                return;
+            }
+            if ac.prev_pos_time == -1.0 {
+                // Second global decode: check if it agrees with candidate
+                let dist = distance_nm(ac.prev_lat, ac.prev_lon, lat, lon);
+                if dist < 50.0 {
+                    // Confirmed! Accept this position
+                    ac.lat = Some(lat);
+                    ac.lon = Some(lon);
+                    ac.seen_pos = t;
+                    ac.prev_lat = lat;
+                    ac.prev_lon = lon;
+                    ac.prev_pos_time = t;
+                    ac.trace.push(TracePoint { ts: t, lat, lon, alt: ac.alt_baro, gs: ac.gs });
+                    if ac.trace.len() > 1000 { ac.trace.remove(0); }
+                } else {
+                    // Disagreement — reset, try again with this as new candidate
+                    ac.prev_lat = lat;
+                    ac.prev_lon = lon;
+                    // stays at -1.0
+                }
+                return;
+            }
+            // Already have confirmed position — speed check
             if speed_check(ac, lat, lon, t) {
                 ac.lat = Some(lat);
                 ac.lon = Some(lon);

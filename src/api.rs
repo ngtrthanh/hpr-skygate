@@ -249,6 +249,16 @@ fn handle(
         send(&mut stream, "200 OK", "application/json", j.as_bytes());
         return;
     }
+    if path == "/data/aircraft.binCraft" {
+        if decode_enabled { send(&mut stream, "200 OK", "application/octet-stream", &bincraft_cache.read().unwrap()); }
+        else { send(&mut stream, "503 Unavailable", "text/plain", b"decode off"); }
+        return;
+    }
+    if path == "/data/aircraft.json" {
+        if decode_enabled { send(&mut stream, "200 OK", "application/json", &json_cache.read().unwrap()); }
+        else { send(&mut stream, "503 Unavailable", "text/plain", b"decode off"); }
+        return;
+    }
 
     // Static files
     if let Some(dir) = web_dir {
