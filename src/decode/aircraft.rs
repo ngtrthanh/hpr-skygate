@@ -214,10 +214,17 @@ impl Store {
 
         // Try relative decode first if we have a confirmed position
         if ac.prev_pos_time > 0.0 {
+            // Use most recent CPR frame with valid receiver_id
             let (cpr_lat, cpr_lon, is_odd) = match (ac.cpr_even, ac.cpr_odd) {
-                (Some(e), Some(o)) => if e.2 > o.2 { (e.0, e.1, false) } else { (o.0, o.1, true) },
-                (Some(e), None) => (e.0, e.1, false),
-                (None, Some(o)) => (o.0, o.1, true),
+                (Some(e), Some(o)) => {
+                    // Prefer the more recent frame, but only if it has valid receiver_id
+                    if e.2 > o.2 && e.3 != 0 { (e.0, e.1, false) }
+                    else if o.3 != 0 { (o.0, o.1, true) }
+                    else if e.3 != 0 { (e.0, e.1, false) }
+                    else { return; } // both rid=0, skip
+                }
+                (Some(e), None) => if e.3 != 0 { (e.0, e.1, false) } else { return; },
+                (None, Some(o)) => if o.3 != 0 { (o.0, o.1, true) } else { return; },
                 _ => return,
             };
             if let Some((lat, lon)) = cpr::decode_cpr_relative(
@@ -239,16 +246,22 @@ impl Store {
             return;
         }
 
-        // Global decode: need even+odd pair from same receiver within timeout
-        let (even, odd) = match (ac.cpr_even, ac.cpr_odd) {
-            (Some(e), Some(o)) => (e, o),
-            _ => return,
+        // Global decode: find a per-receiver slot with both even+odd within timeout
+        let mut best: Option<(u32, u32, u32, u32, bool)> = None;
+        for slot in ac.cpr_slots.values() {
+            if let (Some(e), Some(o)) = (slot.even, slot.odd) {
+                if (e.2 - o.2).abs() <= CPR_PAIR_TIMEOUT {
+                    let fflag = o.2 > e.2;
+                    best = Some((e.0, e.1, o.0, o.1, fflag));
+                    break;
+                }
+            }
+        }
+        let (elat, elon, olat, olon, fflag) = match best {
+            Some(p) => p,
+            None => return,
         };
-        // Same receiver required (skip if either is 0/unknown)
-        if even.3 != 0 && odd.3 != 0 && even.3 != odd.3 { return; }
-        if (even.2 - odd.2).abs() > CPR_PAIR_TIMEOUT { return; }
-        let fflag = odd.2 > even.2;
-        if let Some((lat, lon)) = cpr::decode_cpr_airborne(even.0, even.1, odd.0, odd.1, fflag) {
+        if let Some((lat, lon)) = cpr::decode_cpr_airborne(elat, elon, olat, olon, fflag) {
             // Accept first global decode (CPR math is unambiguous for airborne)
             ac.lat = Some(lat);
             ac.lon = Some(lon);
