@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::net::TcpListener;
 use std::thread;
@@ -6,9 +7,11 @@ use clap::Parser;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
+mod alerts;
 mod api;
 mod beast;
 mod client;
+mod compact_ingest;
 mod config;
 mod decode;
 mod enrichment;
@@ -89,6 +92,11 @@ fn main() {
     let bincraft_cache: Arc<RwLock<Vec<u8>>> = Arc::new(RwLock::new(Vec::new()));
     let trace_cache: Arc<RwLock<std::collections::HashMap<u32, String>>> = Arc::new(RwLock::new(std::collections::HashMap::new()));
 
+    // Shared state for M3/M4
+    let alert_store = Arc::new(RwLock::new(alerts::AlertStore::new(1000)));
+    let kick_list: Arc<RwLock<Vec<String>>> = Arc::new(RwLock::new(Vec::new()));
+    let rate_overrides: Arc<RwLock<HashMap<String, u64>>> = Arc::new(RwLock::new(HashMap::new()));
+
     // Spawn HTTP API
     let api_tracker = Arc::clone(&tracker);
     let http_addr = cfg.http.clone();
@@ -97,8 +105,11 @@ fn main() {
     let api_tc = Arc::clone(&trace_cache);
     let web_dir = cfg.web_dir.clone();
     let decode_enabled = cfg.decode;
+    let api_alerts = Arc::clone(&alert_store);
+    let api_kick = Arc::clone(&kick_list);
+    let api_rate = Arc::clone(&rate_overrides);
     thread::spawn(move || {
-        api::run_blocking(api_tracker, &http_addr, api_json, api_bc, api_tc, web_dir, decode_enabled);
+        api::run_blocking(api_tracker, &http_addr, api_json, api_bc, api_tc, web_dir, decode_enabled, api_alerts, api_kick, api_rate);
     });
 
     // Spawn WebSocket push server
@@ -109,6 +120,13 @@ fn main() {
             thread::spawn(move || ws::run_ws_server(&ws_addr, ws_cache));
         }
     }
+
+    // Compact ingest from hpr-demod
+    let demod_rx = cfg.net_demod_port.map(|port| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        compact_ingest::spawn_compact_listener(port, tx);
+        rx
+    });
 
     // Run single-threaded ingest loop (blocks forever)
     ingest::run_ingest_loop(
@@ -130,5 +148,9 @@ fn main() {
         &mut sbs_listener,
         &mut atlas_out,
         &mut atlas_listener,
+        demod_rx,
+        alert_store,
+        kick_list,
+        rate_overrides,
     );
 }

@@ -62,4 +62,8 @@ pub struct Config {
     /// WebSocket push port (binary aircraft data)
     #[arg(long)]
     pub ws_port: Option<u16>,
+
+    /// Compact frame ingest port (from hpr-demod)
+    #[arg(long)]
+    pub net_demod_port: Option<u16>,
 }

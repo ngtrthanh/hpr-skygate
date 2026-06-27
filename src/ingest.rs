@@ -1,11 +1,13 @@
 use std::collections::HashMap;
 use std::io::Read;
 use std::net::SocketAddr;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use mio::net::TcpListener;
 use mio::{Events, Interest, Poll, Token};
 
+use crate::alerts::{Alert, AlertStore};
 use crate::client::ClientState;
 use crate::feeder::FeederTracker;
 use crate::writer::OutputWriter;
@@ -40,6 +42,10 @@ pub fn run_ingest_loop(
     sbs_listener: &mut Option<std::net::TcpListener>,
     atlas_out: &mut Option<OutputWriter>,
     atlas_listener: &mut Option<std::net::TcpListener>,
+    demod_rx: Option<std::sync::mpsc::Receiver<crate::decode::mode_s::ModeS>>,
+    alert_store: Arc<RwLock<AlertStore>>,
+    kick_list: Arc<RwLock<Vec<String>>>,
+    rate_overrides: Arc<RwLock<HashMap<String, u64>>>,
 ) {
     let mut poll = Poll::new().expect("poll");
     let mut events = Events::with_capacity(4096);
@@ -96,6 +102,7 @@ pub fn run_ingest_loop(
 
     let flush_check_interval = Duration::from_millis(50);
     let mut last_flush_check = Instant::now();
+    let mut last_stall_check = Instant::now();
 
     // Vec to collect decoded frames for reduce/sbs processing outside the closure
     let mut decoded_frames: Vec<(Vec<u8>, crate::decode::mode_s::ModeS)> = Vec::new();
@@ -190,7 +197,16 @@ pub fn run_ingest_loop(
                     if remove {
                         if let Some(mut feeder) = feeders.remove(&token) {
                             poll.registry().deregister(&mut feeder.stream).ok();
-                            tracker.disconnect(&feeder.state.addr);
+                            let addr = feeder.state.addr.clone();
+                            tracker.disconnect(&addr);
+                            let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64();
+                            alert_store.write().unwrap().push(Alert {
+                                ts,
+                                level: "warn".into(),
+                                kind: "feeder_dropout".into(),
+                                message: format!("Feeder {} disconnected", addr),
+                                target: addr,
+                            });
                         }
                     }
                 }
@@ -226,6 +242,14 @@ pub fn run_ingest_loop(
             if let Some(ref mut sw) = sbs_out { sw.check_flush(); }
             if let Some(ref mut aw) = atlas_out { aw.check_flush(); }
             if let Some(ref mut store) = aircraft_store { store.reap_stale(); }
+            // Drain compact ingest channel
+            if let Some(ref rx) = demod_rx {
+                while let Ok(msg) = rx.try_recv() {
+                    if let Some(ref mut store) = aircraft_store {
+                        store.update(msg);
+                    }
+                }
+            }
             // Rebuild caches + atlas every 1s
             if now.duration_since(last_cache_rebuild) >= Duration::from_secs(1) {
                 if let Some(ref store) = aircraft_store {
@@ -259,6 +283,57 @@ pub fn run_ingest_loop(
                     }
                 }
                 last_trace_rebuild = now;
+            }
+            // M4: Process kick list
+            {
+                let mut kicks = kick_list.write().unwrap();
+                if !kicks.is_empty() {
+                    let to_kick: Vec<String> = kicks.drain(..).collect();
+                    drop(kicks);
+                    feeders.retain(|_token, feeder| {
+                        let addr_str = feeder.addr.to_string();
+                        let should_kick = to_kick.iter().any(|id| {
+                            addr_str == *id || addr_str.starts_with(&format!("{}:", id)) || feeder.state.uuid.as_deref() == Some(id.as_str())
+                        });
+                        if should_kick {
+                            poll.registry().deregister(&mut feeder.stream).ok();
+                            tracker.disconnect(&feeder.state.addr);
+                        }
+                        !should_kick
+                    });
+                }
+            }
+            // M3: Stall detection every 10s
+            if now.duration_since(last_stall_check) >= Duration::from_secs(10) {
+                let stalled = tracker.stalled_feeders(60);
+                if !stalled.is_empty() {
+                    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64();
+                    let mut store = alert_store.write().unwrap();
+                    for addr in stalled {
+                        store.push(Alert {
+                            ts,
+                            level: "warn".into(),
+                            kind: "feeder_stall".into(),
+                            message: format!("Feeder {} stalled (no data >60s)", addr),
+                            target: addr,
+                        });
+                    }
+                }
+                // M4: Apply rate overrides
+                let overrides = rate_overrides.read().unwrap();
+                if !overrides.is_empty() {
+                    for feeder in feeders.values_mut() {
+                        let addr = feeder.addr.to_string();
+                        if let Some(&limit) = overrides.get(&addr) {
+                            feeder.state.rate_limit = limit;
+                        } else if let Some(ref uuid) = feeder.state.uuid {
+                            if let Some(&limit) = overrides.get(uuid) {
+                                feeder.state.rate_limit = limit;
+                            }
+                        }
+                    }
+                }
+                last_stall_check = now;
             }
             last_flush_check = now;
         }

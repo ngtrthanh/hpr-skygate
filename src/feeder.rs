@@ -16,6 +16,8 @@ pub struct FeederInfo {
     pub msg_count: u64,
     pub uptime_sec: f64,
     pub garbage: bool,
+    pub lat: Option<f64>,
+    pub lon: Option<f64>,
 }
 
 struct Entry {
@@ -25,6 +27,9 @@ struct Entry {
     msg_count: u64,
     connected_at: Instant,
     garbage: bool,
+    lat: Option<f64>,
+    lon: Option<f64>,
+    last_msg_at: Instant,
 }
 
 pub struct FeederTracker {
@@ -41,13 +46,17 @@ impl FeederTracker {
     }
 
     pub fn connect(&self, addr: &str) {
+        let now = Instant::now();
         self.feeders.insert(addr.to_string(), Entry {
             uuid: None,
             receiver_id: 0,
             bytes_recv: 0,
             msg_count: 0,
-            connected_at: Instant::now(),
+            connected_at: now,
             garbage: false,
+            lat: None,
+            lon: None,
+            last_msg_at: now,
         });
     }
 
@@ -58,6 +67,7 @@ impl FeederTracker {
             e.bytes_recv = client.bytes_recv;
             e.msg_count = client.msg_count;
             e.garbage = client.garbage;
+            e.last_msg_at = Instant::now();
         }
     }
 
@@ -87,6 +97,27 @@ impl FeederTracker {
         self.feeders.len()
     }
 
+    pub fn set_location(&self, uuid_or_addr: &str, lat: f64, lon: f64) {
+        for mut e in self.feeders.iter_mut() {
+            if e.key() == uuid_or_addr || e.value().uuid.as_deref() == Some(uuid_or_addr) {
+                e.lat = Some(lat);
+                e.lon = Some(lon);
+                return;
+            }
+        }
+    }
+
+    pub fn stalled_feeders(&self, timeout_secs: u64) -> Vec<String> {
+        let now = Instant::now();
+        let mut stalled = Vec::new();
+        for e in self.feeders.iter() {
+            if now.duration_since(e.last_msg_at).as_secs() > timeout_secs {
+                stalled.push(e.key().clone());
+            }
+        }
+        stalled
+    }
+
     pub fn snapshot(&self) -> Vec<FeederInfo> {
         let now = Instant::now();
         self.feeders.iter().map(|e| {
@@ -99,6 +130,8 @@ impl FeederTracker {
                 msg_count: v.msg_count,
                 uptime_sec: now.duration_since(v.connected_at).as_secs_f64(),
                 garbage: v.garbage,
+                lat: v.lat,
+                lon: v.lon,
             }
         }).collect()
     }

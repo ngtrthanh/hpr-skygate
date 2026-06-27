@@ -35,7 +35,10 @@ fn handle(mut s: TcpStream, cache: Arc<RwLock<Vec<u8>>>) {
         }
         let data = cache.read().unwrap().clone();
         if data.is_empty() { continue; }
-        if ws_write_bin(&mut s, &data).is_err() { break; }
+        let mut payload = Vec::with_capacity(1 + data.len());
+        payload.push(0x01u8); // type: aircraft binCraft
+        payload.extend_from_slice(&data);
+        if ws_write_bin(&mut s, &payload).is_err() { break; }
     }
 }
 

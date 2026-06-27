@@ -15,6 +15,7 @@ pub struct ClientState {
     pub garbage: bool,
     pub msg_count: u64,
     pub bytes_recv: u64,
+    pub rate_limit: u64,
 
     framer: BeastFramer,
     rate_count: u64,
@@ -33,6 +34,7 @@ impl ClientState {
             garbage: false,
             msg_count: 0,
             bytes_recv: 0,
+            rate_limit: RATE_LIMIT,
             framer: BeastFramer::new(),
             rate_count: 0,
             rate_reset: now + std::time::Duration::from_secs(RATE_WINDOW_SECS),
@@ -98,7 +100,7 @@ impl ClientState {
         let now = Instant::now();
         if now >= self.rate_reset {
             let rate = self.rate_count / RATE_WINDOW_SECS;
-            self.garbage = rate > RATE_LIMIT;
+            self.garbage = rate > self.rate_limit;
             self.rate_count = 0;
             self.rate_reset = now + std::time::Duration::from_secs(RATE_WINDOW_SECS);
         }

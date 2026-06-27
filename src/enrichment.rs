@@ -75,7 +75,8 @@ impl Enrichment {
 
         // Batch lookup pending callsigns
         if !self.pending.is_empty() && now.duration_since(self.last_batch) >= BATCH_INTERVAL {
-            let batch: Vec<String> = self.pending.drain(..).take(20).collect();
+            let n = self.pending.len().min(20);
+            let batch: Vec<String> = self.pending.drain(..n).collect();
             for cs in &batch {
                 match lookup_route(&self.traffic_api, cs) {
                     Some(route) => { self.routes.insert(cs.clone(), route); }
@@ -97,19 +98,7 @@ impl Enrichment {
 
 fn lookup_route(api_url: &str, callsign: &str) -> Option<LearnedRoute> {
     let url = format!("{}/v1/routes/{}", api_url, callsign);
-    let resp = match std::net::TcpStream::connect_timeout(
-        &url.replace("http://", "").replace("/v1/routes/", "").parse().ok()?,
-        Duration::from_millis(500),
-    ) {
-        Ok(_) => {}
-        Err(_) => return None,
-    };
-
-    // Simple HTTP GET
-    let body = match http_get(&url) {
-        Some(b) => b,
-        None => return None,
-    };
+    let body = http_get(&url)?;
 
     let v: serde_json::Value = serde_json::from_str(&body).ok()?;
     let airports = v.get("airport_codes").and_then(|v| v.as_str()).map(|s| s.to_string());
@@ -125,15 +114,13 @@ fn lookup_route(api_url: &str, callsign: &str) -> Option<LearnedRoute> {
 }
 
 fn http_get(url: &str) -> Option<String> {
-    // Minimal HTTP/1.1 GET without external deps
     let url_parts: Vec<&str> = url.strip_prefix("http://")?.splitn(2, '/').collect();
     let host = url_parts[0];
     let path = format!("/{}", url_parts.get(1).unwrap_or(&""));
 
-    let mut stream = std::net::TcpStream::connect_timeout(
-        &host.parse().ok()?,
-        Duration::from_millis(500),
-    ).ok()?;
+    use std::net::ToSocketAddrs;
+    let addr = host.to_socket_addrs().ok()?.next()?;
+    let mut stream = std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(500)).ok()?;
     stream.set_read_timeout(Some(Duration::from_millis(1000))).ok()?;
 
     use std::io::Write;
@@ -142,7 +129,6 @@ fn http_get(url: &str) -> Option<String> {
     let mut buf = Vec::new();
     stream.read_to_end(&mut buf).ok();
     let text = String::from_utf8_lossy(&buf);
-    // Extract body after \r\n\r\n
     let body = text.split("\r\n\r\n").nth(1)?;
     Some(body.to_string())
 }
