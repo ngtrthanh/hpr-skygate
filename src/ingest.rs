@@ -170,6 +170,7 @@ pub fn run_ingest_loop(
                         match feeder.stream.read(&mut buf) {
                             Ok(0) => remove = true,
                             Ok(n) => {
+                                let recv_id = feeder.state.receiver_id;
                                 feeder.state.feed(&buf[..n], prepend_recv_id, |frame, is_garbage| {
                                     if is_garbage {
                                         if let Some(ref mut gw) = garbage_out {
@@ -181,7 +182,8 @@ pub fn run_ingest_loop(
                                     // Decode if enabled
                                     if aircraft_store.is_some() && frame.len() >= 9 && (frame[1] == 0x32 || frame[1] == 0x33) {
                                         if let Some(payload) = unescape_payload(frame) {
-                                            if let Some(msg) = crate::decode::mode_s::decode(&payload) {
+                                            if let Some(mut msg) = crate::decode::mode_s::decode(&payload) {
+                                                msg.receiver_id = recv_id;
                                                 aircraft_store.as_mut().unwrap().update(msg.clone());
                                                 decoded_frames.push((frame.to_vec(), msg));
                                             }

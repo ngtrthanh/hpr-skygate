@@ -32,6 +32,11 @@ pub struct TracePoint {
 }
 
 #[derive(Debug, Clone)]
+pub struct CprSlot {
+    pub even: Option<(u32, u32, f64)>, // (lat_cpr, lon_cpr, time)
+    pub odd: Option<(u32, u32, f64)>,
+}
+
 pub struct Aircraft {
     pub hex: u32,
     pub flight: Option<String>,
@@ -72,8 +77,10 @@ pub struct Aircraft {
     pub trace: Vec<TracePoint>,
 
     // CPR state
-    cpr_even: Option<(u32, u32, f64)>, // (lat, lon, time)
-    cpr_odd: Option<(u32, u32, f64)>,
+    cpr_even: Option<(u32, u32, f64, u64)>, // (lat, lon, time, receiver_id)
+    cpr_odd: Option<(u32, u32, f64, u64)>,
+    /// Per-receiver CPR slots: key=receiver_id, value=(even, odd)
+    cpr_slots: std::collections::HashMap<u64, CprSlot>,
     prev_lat: f64,
     prev_lon: f64,
     prev_pos_time: f64,
@@ -93,7 +100,7 @@ impl Aircraft {
             addr_type: 0, on_ground: false,
             reg: None, typecode: None, route: None,
             trace: Vec::new(),
-            cpr_even: None, cpr_odd: None,
+            cpr_even: None, cpr_odd: None, cpr_slots: std::collections::HashMap::new(),
             prev_lat: 0.0, prev_lon: 0.0, prev_pos_time: 0.0,
         }
     }
@@ -184,12 +191,19 @@ impl Store {
         if let Some(v) = msg.nav_heading { ac.nav_heading = Some(v); }
         if let Some(v) = msg.emergency { ac.emergency = Some(v); }
 
-        // CPR position decode
+        // CPR position decode — store per receiver
         if let (Some(cpr_lat), Some(cpr_lon), Some(odd)) = (msg.cpr_lat, msg.cpr_lon, msg.cpr_odd) {
+            let rid = msg.receiver_id;
+            if rid != 0 {
+                let slot = ac.cpr_slots.entry(rid).or_insert(CprSlot { even: None, odd: None });
+                if odd { slot.odd = Some((cpr_lat, cpr_lon, t)); }
+                else { slot.even = Some((cpr_lat, cpr_lon, t)); }
+            }
+            // Also store in legacy fields for relative decode (uses any recent frame)
             if odd {
-                ac.cpr_odd = Some((cpr_lat, cpr_lon, t));
+                ac.cpr_odd = Some((cpr_lat, cpr_lon, t, rid));
             } else {
-                ac.cpr_even = Some((cpr_lat, cpr_lon, t));
+                ac.cpr_even = Some((cpr_lat, cpr_lon, t, rid));
             }
             self.try_position(msg.icao, t);
         }
@@ -198,8 +212,9 @@ impl Store {
     fn try_position(&mut self, icao: u32, t: f64) {
         let ac = match self.map.get_mut(&icao) { Some(a) => a, None => return };
 
-        // Always try relative decode first if we have a prior position
+        // Always try relative decode first if we have a confirmed position
         if ac.prev_pos_time > 0.0 {
+            // Use the most recent CPR frame (any receiver) for relative decode
             let (cpr_lat, cpr_lon, is_odd) = match (ac.cpr_even, ac.cpr_odd) {
                 (Some(e), Some(o)) => if e.2 > o.2 { (e.0, e.1, false) } else { (o.0, o.1, true) },
                 (Some(e), None) => (e.0, e.1, false),
@@ -221,23 +236,31 @@ impl Store {
                     return;
                 }
             }
-            // Relative failed — don't fall through to global if we already have a position
-            // (relative failure means speed check failed = probably stale/wrong prior)
-            // Reset prior and let next global pair re-establish
+            // Relative failed — reset if stale
             if t - ac.prev_pos_time > 30.0 {
                 ac.prev_pos_time = 0.0;
+                ac.prev_lat = 0.0;
+                ac.prev_lon = 0.0;
             }
             return;
         }
 
-        // Global decode: need even+odd pair
-        let (even, odd) = match (ac.cpr_even, ac.cpr_odd) {
-            (Some(e), Some(o)) => (e, o),
-            _ => return,
+        // Global decode: find a per-receiver slot with both even+odd within timeout
+        let mut best_pair: Option<(u32, u32, u32, u32, bool)> = None;
+        for slot in ac.cpr_slots.values() {
+            if let (Some(e), Some(o)) = (slot.even, slot.odd) {
+                if (e.2 - o.2).abs() <= CPR_PAIR_TIMEOUT {
+                    let fflag = o.2 > e.2;
+                    best_pair = Some((e.0, e.1, o.0, o.1, fflag));
+                    break;
+                }
+            }
+        }
+        let (elat, elon, olat, olon, fflag) = match best_pair {
+            Some(p) => p,
+            None => return,
         };
-        if (even.2 - odd.2).abs() > CPR_PAIR_TIMEOUT { return; }
-        let fflag = odd.2 > even.2;
-        if let Some((lat, lon)) = cpr::decode_cpr_airborne(even.0, even.1, odd.0, odd.1, fflag) {
+        if let Some((lat, lon)) = cpr::decode_cpr_airborne(elat, elon, olat, olon, fflag) {
             // First global decode: store as candidate, don't accept yet
             if ac.prev_pos_time == 0.0 && ac.prev_lat == 0.0 && ac.prev_lon == 0.0 {
                 // First candidate — store but don't publish
@@ -368,7 +391,7 @@ mod tests {
 
     fn default_msg() -> ModeS {
         ModeS {
-            df: 0, icao: 0, altitude: None, squawk: None, callsign: None,
+            df: 0, icao: 0, receiver_id: 0, altitude: None, squawk: None, callsign: None,
             category: None, cpr_lat: None, cpr_lon: None, cpr_odd: None,
             airborne: true, gs: None, track: None, baro_rate: None, geom_rate: None,
             ias: None, tas: None, mag_heading: None, adsb_version: None,

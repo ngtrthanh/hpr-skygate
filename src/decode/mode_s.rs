@@ -7,6 +7,7 @@ use super::crc::modes_checksum;
 pub struct ModeS {
     pub df: u8,
     pub icao: u32,
+    pub receiver_id: u64,
     pub altitude: Option<i32>,
     pub squawk: Option<u16>,
     pub callsign: Option<String>,
@@ -42,7 +43,7 @@ pub struct ModeS {
 impl ModeS {
     fn new() -> Self {
         Self {
-            df: 0, icao: 0, altitude: None, squawk: None, callsign: None,
+            df: 0, icao: 0, receiver_id: 0, altitude: None, squawk: None, callsign: None,
             category: None, cpr_lat: None, cpr_lon: None, cpr_odd: None,
             airborne: true, gs: None, track: None, baro_rate: None, geom_rate: None,
             ias: None, tas: None, mag_heading: None, adsb_version: None,
