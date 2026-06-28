@@ -118,7 +118,7 @@ fn handle(
         return;
     }
     if path == "/health" {
-        let j = serde_json::json!({ "status": "ok", "feeders": tracker.count(),
+        let j = serde_json::json!({ "status": "ok", "version": env!("CARGO_PKG_VERSION"), "git": env!("GIT_HASH"), "feeders": tracker.count(),
             "vessels": vessel_store.read().unwrap().count(),
             "uptime_seconds": START.get().map(|s| s.elapsed().as_secs_f64()).unwrap_or(0.0) });
         send(&mut stream, "200 OK", "application/json", j.to_string().as_bytes());

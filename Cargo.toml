@@ -1,6 +1,6 @@
 [package]
 name = "hpr-skygate"
-version = "0.4.0"
+version = "0.7.0"
 edition = "2021"
 description = "High-performance ADS-B beast ingest, decode, and fan-out engine"
 license = "MIT"

@@ -36,7 +36,7 @@ fn main() {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .init();
 
-    info!(?cfg, "fa3-v4 starting");
+    info!(version = env!("CARGO_PKG_VERSION"), git = env!("GIT_HASH"), ?cfg, "hpr-skygate starting");
 
     let tracker = Arc::new(FeederTracker::new());
 
@@ -152,6 +152,11 @@ fn main() {
         compact_ingest::spawn_compact_listener(port, tx);
         rx
     });
+
+    // SDR 1090 MHz demod (spawns rtl_sdr, connects to our own bi_port)
+    if let Some(dev) = cfg.sdr_device {
+        sdr::sdr_reader::spawn_sdr_reader(dev, cfg.net_bi_port);
+    }
 
     // Run single-threaded ingest loop (blocks forever)
     ingest::run_ingest_loop(

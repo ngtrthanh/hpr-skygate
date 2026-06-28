@@ -77,12 +77,14 @@ impl Demod1090 {
         }
         match df {
             0 | 4 | 5 | 16 | 20 | 21 => {
-                if avg_conf < 80 { return false; }
+                // Only accept short/interrogation frames if confidence is very high
+                // AND the CRC-derived ICAO looks plausible (not noise)
+                if avg_conf < 120 { return false; }
                 let icao = crc & 0xFFFFFF;
-                if icao != 0 && icao != 0xFFFFFF {
-                    self.frames_ok += 1;
-                    return true;
-                }
+                // Reject common noise patterns
+                if icao == 0 || icao == 0xFFFFFF || icao & 0xFF0000 == 0xFF0000 { return false; }
+                self.frames_ok += 1;
+                return true;
             }
             _ => {}
         }

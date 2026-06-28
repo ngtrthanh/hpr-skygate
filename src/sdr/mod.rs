@@ -4,3 +4,4 @@ pub mod slicer;
 pub mod rtlsdr;
 pub mod demod1090;
 pub mod ais_demod;
+pub mod sdr_reader;
