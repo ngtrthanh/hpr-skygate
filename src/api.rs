@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
+use crate::ais;
 use crate::alerts::AlertStore;
 use crate::feeder::FeederTracker;
 
@@ -22,6 +23,7 @@ pub fn run_blocking(
     alert_store: Arc<RwLock<AlertStore>>,
     kick_list: Arc<RwLock<Vec<String>>>,
     rate_overrides: Arc<RwLock<HashMap<String, u64>>>,
+    vessel_store: Arc<RwLock<ais::vessel::VesselStore>>,
 ) {
     START.get_or_init(Instant::now);
     let listener = TcpListener::bind(addr).expect("bind http");
@@ -37,7 +39,8 @@ pub fn run_blocking(
         let als = Arc::clone(&alert_store);
         let kl = Arc::clone(&kick_list);
         let ro = Arc::clone(&rate_overrides);
-        std::thread::spawn(move || handle(stream, &tracker, &jc, &bc, &tc, wd.as_deref(), decode_enabled, &als, &kl, &ro));
+        let vs = Arc::clone(&vessel_store);
+        std::thread::spawn(move || handle(stream, &tracker, &jc, &bc, &tc, wd.as_deref(), decode_enabled, &als, &kl, &ro, &vs));
     }
 }
 
@@ -52,6 +55,7 @@ fn handle(
     alert_store: &Arc<RwLock<AlertStore>>,
     kick_list: &Arc<RwLock<Vec<String>>>,
     rate_overrides: &Arc<RwLock<HashMap<String, u64>>>,
+    vessel_store: &Arc<RwLock<ais::vessel::VesselStore>>,
 ) {
     let mut buf = [0u8; 4096];
     let n = stream.read(&mut buf).unwrap_or(0);
@@ -108,8 +112,14 @@ fn handle(
         else { send(&mut stream, "503 Unavailable", "text/plain", b"decode off"); }
         return;
     }
+    if path == "/api/vessels" {
+        let json = vessel_store.read().unwrap().to_json();
+        send(&mut stream, "200 OK", "application/json", &json);
+        return;
+    }
     if path == "/health" {
         let j = serde_json::json!({ "status": "ok", "feeders": tracker.count(),
+            "vessels": vessel_store.read().unwrap().count(),
             "uptime_seconds": START.get().map(|s| s.elapsed().as_secs_f64()).unwrap_or(0.0) });
         send(&mut stream, "200 OK", "application/json", j.to_string().as_bytes());
         return;

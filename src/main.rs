@@ -97,6 +97,30 @@ fn main() {
     let kick_list: Arc<RwLock<Vec<String>>> = Arc::new(RwLock::new(Vec::new()));
     let rate_overrides: Arc<RwLock<HashMap<String, u64>>> = Arc::new(RwLock::new(HashMap::new()));
 
+    // AIS vessel store (always created, stays empty if no --ais-sources)
+    let vessel_store: Arc<RwLock<ais::vessel::VesselStore>> = Arc::new(RwLock::new(ais::vessel::VesselStore::new()));
+
+    if let Some(ref ais_cfg) = cfg.ais_sources {
+        let (tx, rx) = std::sync::mpsc::channel();
+        ais::spawn_ais_readers(ais_cfg, tx);
+        let vs = Arc::clone(&vessel_store);
+        thread::spawn(move || {
+            for frame in rx {
+                let mut store = vs.write().unwrap();
+                match frame {
+                    ais::decode::AisFrame::Position { ref data, .. } => store.update_position(data),
+                    ais::decode::AisFrame::Static { ref data, ref name, ref callsign, ship_type, .. } => store.update_static(data, name, callsign, ship_type),
+                    ais::decode::AisFrame::AtoN { .. } => {}
+                }
+            }
+        });
+        let vs_reap = Arc::clone(&vessel_store);
+        thread::spawn(move || loop {
+            thread::sleep(std::time::Duration::from_secs(60));
+            vs_reap.write().unwrap().reap_stale();
+        });
+    }
+
     // Spawn HTTP API
     let api_tracker = Arc::clone(&tracker);
     let http_addr = cfg.http.clone();
@@ -108,8 +132,9 @@ fn main() {
     let api_alerts = Arc::clone(&alert_store);
     let api_kick = Arc::clone(&kick_list);
     let api_rate = Arc::clone(&rate_overrides);
+    let api_vessels = Arc::clone(&vessel_store);
     thread::spawn(move || {
-        api::run_blocking(api_tracker, &http_addr, api_json, api_bc, api_tc, web_dir, decode_enabled, api_alerts, api_kick, api_rate);
+        api::run_blocking(api_tracker, &http_addr, api_json, api_bc, api_tc, web_dir, decode_enabled, api_alerts, api_kick, api_rate, api_vessels);
     });
 
     // Spawn WebSocket push server
@@ -154,3 +179,4 @@ fn main() {
         rate_overrides,
     );
 }
+mod ais;

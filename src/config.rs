@@ -66,4 +66,8 @@ pub struct Config {
     /// Compact frame ingest port (from hpr-demod)
     #[arg(long)]
     pub net_demod_port: Option<u16>,
+
+    /// AIS TCP sources (format: "name=host:port,name2=host2:port2")
+    #[arg(long)]
+    pub ais_sources: Option<String>,
 }
