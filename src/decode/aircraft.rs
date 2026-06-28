@@ -347,12 +347,37 @@ fn load_aircraft_db() -> StdHashMap<u32, (String, String)> {
 }
 
 fn speed_check(ac: &Aircraft, lat: f64, lon: f64, t: f64) -> bool {
+    // Reject impossible positions
+    if lat.abs() > 82.0 { return false; }
+
     if ac.prev_pos_time == 0.0 { return true; }
     let elapsed = t - ac.prev_pos_time;
     if elapsed < 0.1 { return true; }
     let dist = distance_nm(ac.prev_lat, ac.prev_lon, lat, lon);
     let speed = dist / (elapsed / 3600.0);
-    speed < SPEED_MAX_KT
+    if speed >= SPEED_MAX_KT { return false; }
+
+    // Track direction check: if we have heading and moved > 5nm, reject if direction > 90° off
+    if dist > 5.0 {
+        if let Some(track) = ac.track {
+            let bearing = bearing_deg(ac.prev_lat, ac.prev_lon, lat, lon);
+            let diff = (bearing - track + 540.0) % 360.0 - 180.0;
+            // Allow 120° deviation (aircraft can turn, but not reverse)
+            if diff.abs() > 120.0 && elapsed < 30.0 {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn bearing_deg(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+    let lat1 = lat1.to_radians();
+    let lat2 = lat2.to_radians();
+    let dlon = (lon2 - lon1).to_radians();
+    let x = dlon.sin() * lat2.cos();
+    let y = lat1.cos() * lat2.sin() - lat1.sin() * lat2.cos() * dlon.cos();
+    (x.atan2(y).to_degrees() + 360.0) % 360.0
 }
 
 #[cfg(test)]
