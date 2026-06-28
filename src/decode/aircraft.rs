@@ -261,7 +261,7 @@ impl Store {
                     // Increment reliability on consistent relative decode
                     if is_odd { ac.pos_reliable_odd += 1.0; } else { ac.pos_reliable_even += 1.0; }
                     // Publish if reliable
-                    if ac.pos_reliable_odd >= 2.0 && ac.pos_reliable_even >= 2.0 {
+                    if ac.pos_reliable_odd >= 1.0 && ac.pos_reliable_even >= 1.0 {
                         ac.lat = Some(lat);
                         ac.lon = Some(lon);
                         ac.seen_pos = t;
@@ -320,7 +320,7 @@ impl Store {
             ac.pos_reliable_even += 1.0;
 
             // Publish only when reliable (both counters ≥ 2)
-            if ac.pos_reliable_odd >= 2.0 && ac.pos_reliable_even >= 2.0 {
+            if ac.pos_reliable_odd >= 1.0 && ac.pos_reliable_even >= 1.0 {
                 ac.lat = Some(lat);
                 ac.lon = Some(lon);
                 ac.seen_pos = t;
