@@ -22,3 +22,7 @@ opt-level = 3
 lto = true
 strip = true
 codegen-units = 1
+
+[[bin]]
+name = "sdr-test"
+path = "src/bin/sdr_test.rs"
