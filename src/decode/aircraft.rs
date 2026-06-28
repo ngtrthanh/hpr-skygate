@@ -199,7 +199,7 @@ impl Store {
         // CPR position decode — store per receiver
         if let (Some(cpr_lat), Some(cpr_lon), Some(odd)) = (msg.cpr_lat, msg.cpr_lon, msg.cpr_odd) {
             let rid = msg.receiver_id;
-            if rid != 0 {
+            {
                 let slot = ac.cpr_slots.entry(rid).or_insert(CprSlot { even: None, odd: None });
                 if odd { slot.odd = Some((cpr_lat, cpr_lon, t)); }
                 else { slot.even = Some((cpr_lat, cpr_lon, t)); }

@@ -78,5 +78,13 @@ pub struct Config {
     /// RTL-SDR device index for 162 MHz AIS demod
     #[arg(long)]
     pub ais_device: Option<u32>,
+
+    /// Receiver latitude
+    #[arg(long)]
+    pub lat: Option<f64>,
+
+    /// Receiver longitude
+    #[arg(long)]
+    pub lon: Option<f64>,
 }
 
