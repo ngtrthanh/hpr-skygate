@@ -65,8 +65,7 @@ impl AisDemod {
                 // Slice: positive = 1, negative = 0
                 let bit = if demod > 0.0 { 1u8 } else { 0u8 };
 
-                // NRZI decode: bit = (current == previous) → 0, different → 1
-                // In NRZI: no transition = 1, transition = 0
+                // NRZI decode: transition = 0, no transition = 1 (AIS standard)
                 let nrzi_bit = if bit == ((self.shift_reg >> 7) & 1) { 1u8 } else { 0u8 };
 
                 self.process_bit(nrzi_bit, &mut emit);
@@ -76,15 +75,12 @@ impl AisDemod {
 
     fn process_bit(&mut self, bit: u8, emit: &mut impl FnMut(&str)) {
         self.shift_reg = (self.shift_reg << 1) | bit;
-        self.bit_count += 1;
 
         // Check for HDLC flag (0x7E = 01111110)
         if self.shift_reg == HDLC_FLAG {
             if self.in_frame && self.frame_buf.len() >= 5 {
-                // End of frame — check CRC and emit
                 self.finish_frame(emit);
             }
-            // Start new frame
             self.in_frame = true;
             self.frame_buf.clear();
             self.ones_count = 0;
@@ -98,25 +94,24 @@ impl AisDemod {
         if bit == 1 {
             self.ones_count += 1;
             if self.ones_count > 6 {
-                // Abort: too many 1s (invalid frame)
                 self.in_frame = false;
                 return;
             }
         } else {
             if self.ones_count == 5 {
-                // Stuffed bit — discard, don't add to frame
                 self.ones_count = 0;
-                return;
+                return; // stuffed bit, discard
             }
             self.ones_count = 0;
         }
 
         // Accumulate bits into frame bytes
+        self.bit_count += 1;
         if self.bit_count >= 8 {
             self.frame_buf.push(self.shift_reg);
             self.bit_count = 0;
             if self.frame_buf.len() > 512 {
-                self.in_frame = false; // frame too long, abort
+                self.in_frame = false;
             }
         }
     }
