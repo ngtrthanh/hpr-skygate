@@ -144,90 +144,162 @@ const FILTER_TAPS: [f32; 37] = [
     -0.00148464, 0.00119025,
 ];
 
-struct HdlcDecoder {
-    shift_reg: u32,  // sliding window for flag detection (need 8+ bits)
-    byte_acc: u8,    // byte accumulator (LSB-first)
-    bit_count: u8,   // bits accumulated in byte_acc
-    frame_buf: Vec<u8>,
-    ones_count: u8,
-    in_frame: bool,
-    prev_bit: bool,
+// AIS Decoder - ported from ais-catcher's state machine
+// States: TRAINING → STARTFLAG → DATAFCS
+#[derive(Clone, Copy, PartialEq)]
+enum AisDecState { Training, StartFlag, DataFcs }
+
+struct AisDecoder {
+    state: AisDecState,
+    prev: bool,        // previous raw bit (for NRZI)
+    last_bit: bool,    // previous decoded bit (for training detection)
+    position: usize,   // bit counter within current state
+    one_seq: u8,       // consecutive 1s counter
+    bits: Vec<u8>,     // received data bits (one per entry, 0 or 1)
 }
 
-impl HdlcDecoder {
+impl AisDecoder {
     fn new() -> Self {
-        Self { shift_reg: 0, byte_acc: 0, bit_count: 0, frame_buf: Vec::with_capacity(256),
-               ones_count: 0, in_frame: false, prev_bit: false }
+        Self { state: AisDecState::Training, prev: false, last_bit: false,
+               position: 0, one_seq: 0, bits: Vec::with_capacity(1024) }
     }
 
+    fn reset(&mut self) {
+        self.state = AisDecState::Training;
+        self.position = 0;
+        self.one_seq = 0;
+    }
+
+    /// Feed one FM-demodulated sample (at baud rate = 1 sample per bit)
     fn feed(&mut self, sample: f32, out: &mut Vec<String>, stats: &mut (u64, u64)) {
-        let raw_bit = sample > 0.0;
-        // NRZI: no transition = 1, transition = 0
-        let bit: u8 = if raw_bit == self.prev_bit { 1 } else { 0 };
-        self.prev_bit = raw_bit;
+        // NRZI decode: Bit = !(d ^ prev)  [same as ais-catcher]
+        let d = sample > 0.0;
+        let bit = !(d ^ self.prev);
+        self.prev = d;
 
-        // Shift register for flag detection (pre-unstuffing)
-        self.shift_reg = (self.shift_reg << 1) | bit as u32;
-
-        if (self.shift_reg & 0xFF) as u8 == 0x7E {
-            if self.in_frame && self.frame_buf.len() >= 5 {
-                // CRC: run reflected poly over entire frame, expect 0x0F47
-                let mut crc: u16 = 0xFFFF;
-                for &b in &self.frame_buf {
-                    crc ^= b as u16;
-                    for _ in 0..8 {
-                        crc = if crc & 1 != 0 { (crc >> 1) ^ 0x8408 } else { crc >> 1 };
-                    }
-                }
-                if crc == 0x0F47 {
-                    stats.0 += 1;
-                    let plen = self.frame_buf.len() - 2;
-                    let nmea = payload_to_nmea_chars(&self.frame_buf[..plen]);
-                    if !nmea.is_empty() {
-                        let body = format!("AIVDM,1,1,,A,{},0", nmea);
-                        let cs: u8 = body.bytes().fold(0, |a, b| a ^ b);
-                        out.push(format!("!{}*{:02X}", body, cs));
-                    }
+        match self.state {
+            AisDecState::Training => {
+                if bit != self.last_bit {
+                    // Alternating — good training
+                    self.position += 1;
                 } else {
-                    stats.1 += 1;
+                    // Training broken — two same bits in a row
+                    if self.position > 8 {
+                        // Enough training, enter STARTFLAG
+                        // We're at the point where flag starts: ...0101|01*111110
+                        self.state = AisDecState::StartFlag;
+                        self.position = if bit { 3 } else { 1 };
+                    } else {
+                        self.position = 0;
+                    }
                 }
             }
-            self.in_frame = true;
-            self.frame_buf.clear();
-            self.ones_count = 0;
-            self.bit_count = 0;
-            return;
+            AisDecState::StartFlag => {
+                if self.position == 7 {
+                    if !bit {
+                        // Flag complete: 01111110, now data begins
+                        self.state = AisDecState::DataFcs;
+                        self.position = 0;
+                        self.one_seq = 0;
+                        self.bits.clear();
+                    } else {
+                        self.reset();
+                    }
+                } else {
+                    if bit {
+                        self.position += 1;
+                    } else {
+                        self.reset();
+                    }
+                }
+            }
+            AisDecState::DataFcs => {
+                self.bits.push(if bit { 1 } else { 0 });
+                self.position += 1;
+
+                if bit {
+                    if self.one_seq == 5 {
+                        // Six 1s = part of stop flag → try decode
+                        let data_len = self.position - 7; // exclude the 0111111 pattern
+                        if data_len >= 16 {
+                            if self.check_crc(data_len) {
+                                stats.0 += 1;
+                                self.emit_nmea(data_len, out);
+                            } else {
+                                stats.1 += 1;
+                            }
+                        }
+                        self.reset();
+                    } else {
+                        self.one_seq += 1;
+                    }
+                } else {
+                    if self.one_seq == 5 {
+                        // Stuff bit: remove it (don't count)
+                        self.bits.pop();
+                        self.position -= 1;
+                    }
+                    self.one_seq = 0;
+                }
+
+                if self.position > 1200 {
+                    self.reset();
+                }
+            }
         }
-        if !self.in_frame { return; }
-        if bit == 1 {
-            self.ones_count += 1;
-            if self.ones_count > 6 { self.in_frame = false; return; }
-        } else {
-            if self.ones_count == 5 { self.ones_count = 0; return; }
-            self.ones_count = 0;
+        self.last_bit = bit;
+    }
+
+    fn check_crc(&self, len: usize) -> bool {
+        if len > self.bits.len() { return false; }
+        let mut crc: u16 = 0xFFFF;
+        for i in 0..len {
+            let bit = self.bits[i] as u16;
+            if (bit ^ crc) & 1 != 0 {
+                crc = (crc >> 1) ^ 0x8408;
+            } else {
+                crc >>= 1;
+            }
         }
-        self.byte_acc = (self.byte_acc << 1) | bit;
-        self.bit_count += 1;
-        if self.bit_count >= 8 {
-            self.frame_buf.push(self.byte_acc.reverse_bits());
-            self.bit_count = 0;
-            self.byte_acc = 0;
-            if self.frame_buf.len() > 512 { self.in_frame = false; }
+        crc == 0xF0B8
+    }
+
+    fn emit_nmea(&self, len: usize, out: &mut Vec<String>) {
+        let payload_bits = len - 16; // exclude CRC
+        if payload_bits < 6 || payload_bits > self.bits.len() { return; }
+        let chars = payload_bits / 6;
+
+        let mut nmea = String::with_capacity(chars);
+        for c in 0..chars {
+            let mut val: u8 = 0;
+            for b in 0..6 {
+                val = (val << 1) | self.bits[c * 6 + b];
+            }
+            // 6-bit to ASCII armor
+            nmea.push((if val < 40 { val + 48 } else { val + 56 }) as char);
         }
+        let fill = payload_bits % 6;
+        let body = format!("AIVDM,1,1,,A,{},{}", nmea, fill);
+        let cs: u8 = body.bytes().fold(0, |a, b| a ^ b);
+        out.push(format!("!{}*{:02X}", body, cs));
     }
 }
+
 
 struct AisChannel {
     rot_re: f64, rot_im: f64,
     rot_inc_re: f64, rot_inc_im: f64,
-    // Decimate ÷6 accumulator
-    acc_re: f64, acc_im: f64, acc_n: u8,
+    // CIC5 decimator ÷2 (5 cascaded integrator-comb stages)
+    cic_i: [f64; 5], cic_q: [f64; 5],
+    cic_phase: bool,
+    // ÷3 decimator with Blackman-Harris-like FIR (simple 3-tap: [0.25, 0.5, 0.25])
+    d3_buf_i: [f64; 3], d3_buf_q: [f64; 3], d3_idx: u8,
     // FM discriminator
-    fm_prev_re: f64, fm_prev_im: f64, dc_est: f32,
-    // FIR filter
+    fm_prev_re: f64, fm_prev_im: f64,
+    // FIR matched filter
     fir_buf: [f32; 37], fir_idx: usize,
     // 5 parallel decoders (brute-force timing)
-    decoders: Vec<HdlcDecoder>,
+    decoders: Vec<AisDecoder>,
     phase: usize,
 }
 
@@ -237,10 +309,12 @@ impl AisChannel {
         Self {
             rot_re: 1.0, rot_im: 0.0,
             rot_inc_re: angle.cos(), rot_inc_im: angle.sin(),
-            acc_re: 0.0, acc_im: 0.0, acc_n: 0,
-            fm_prev_re: 1.0, fm_prev_im: 0.0, dc_est: 0.0,
+            cic_i: [0.0; 5], cic_q: [0.0; 5],
+            cic_phase: false,
+            d3_buf_i: [0.0; 3], d3_buf_q: [0.0; 3], d3_idx: 0,
+            fm_prev_re: 1.0, fm_prev_im: 0.0,
             fir_buf: [0.0; 37], fir_idx: 0,
-            decoders: (0..5).map(|_| HdlcDecoder::new()).collect(),
+            decoders: (0..5).map(|_| AisDecoder::new()).collect(),
             phase: 0,
         }
     }
@@ -253,25 +327,38 @@ impl AisChannel {
         let ni = self.rot_re * self.rot_inc_im + self.rot_im * self.rot_inc_re;
         self.rot_re = nr; self.rot_im = ni;
 
-        // 2. Accumulate for ÷6 decimation → 48 kSPS
-        self.acc_re += ri;
-        self.acc_im += rq;
-        self.acc_n += 1;
-        if self.acc_n < 6 { return; }
-        let ore = self.acc_re / 6.0;
-        let oim = self.acc_im / 6.0;
-        self.acc_re = 0.0; self.acc_im = 0.0; self.acc_n = 0;
+        // 2. CIC5 decimate ÷2 (288k → 144k)
+        // 5-stage cascaded integrator
+        self.cic_i[0] += ri; self.cic_q[0] += rq;
+        self.cic_i[1] += self.cic_i[0]; self.cic_q[1] += self.cic_q[0];
+        self.cic_i[2] += self.cic_i[1]; self.cic_q[2] += self.cic_q[1];
+        self.cic_i[3] += self.cic_i[2]; self.cic_q[3] += self.cic_q[2];
+        self.cic_i[4] += self.cic_i[3]; self.cic_q[4] += self.cic_q[3];
 
-        // 3. FM discriminator
+        self.cic_phase = !self.cic_phase;
+        if !self.cic_phase { return; } // output every 2nd sample
+
+        let ci = self.cic_i[4] / 32.0; // normalize
+        let cq = self.cic_q[4] / 32.0;
+        // Reset integrators for next pair
+        self.cic_i = [0.0; 5]; self.cic_q = [0.0; 5];
+
+        // 3. ÷3 decimation (144k → 48k) with simple averaging
+        self.d3_buf_i[self.d3_idx as usize] = ci;
+        self.d3_buf_q[self.d3_idx as usize] = cq;
+        self.d3_idx += 1;
+        if self.d3_idx < 3 { return; }
+        self.d3_idx = 0;
+        let ore = (self.d3_buf_i[0] + self.d3_buf_i[1] + self.d3_buf_i[2]) / 3.0;
+        let oim = (self.d3_buf_q[0] + self.d3_buf_q[1] + self.d3_buf_q[2]) / 3.0;
+
+        // 4. FM discriminator
         let cross = oim * self.fm_prev_re - ore * self.fm_prev_im;
         let dot = ore * self.fm_prev_re + oim * self.fm_prev_im;
         let fm = (cross.atan2(dot) / std::f64::consts::PI) as f32;
-        // DC removal (single-pole IIR high-pass, alpha=0.999)
-        let dc_removed = fm - self.dc_est;
-        self.dc_est += 0.001 * (fm - self.dc_est);
         self.fm_prev_re = ore; self.fm_prev_im = oim;
 
-        // 4. Matched filter (37-tap FIR)
+        // 5. Matched filter (37-tap FIR)
         self.fir_buf[self.fir_idx] = fm;
         self.fir_idx = (self.fir_idx + 1) % 37;
         let mut filtered: f32 = 0.0;
@@ -280,7 +367,7 @@ impl AisChannel {
         }
 
         // 5. Deinterleave to 5 parallel decoders
-        self.decoders[self.phase].feed(dc_removed, out, stats);
+        self.decoders[self.phase].feed(filtered, out, stats);
         self.phase = (self.phase + 1) % SAMPLES_PER_BIT;
     }
 
@@ -302,8 +389,8 @@ impl AisState {
     fn new(sr: u32) -> Self {
         let s = sr as f64;
         Self {
-            ch_a: AisChannel::new(0.0, s),
-            ch_b: AisChannel::new(0.0, s),
+            ch_a: AisChannel::new(-25000.0, s),
+            ch_b: AisChannel::new(25000.0, s),
             count: 0, frames_ok: 0, frames_crc_fail: 0,
         }
     }
