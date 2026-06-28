@@ -333,6 +333,7 @@ impl Store {
         let t = now_s();
         self.map.retain(|_, ac| t - ac.seen < STALE_TIMEOUT);
         self.enrichment.tick();
+        self.receiver_map.persist();
     }
 
     pub fn aircraft_count(&self) -> usize { self.map.len() }

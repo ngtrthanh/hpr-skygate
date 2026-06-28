@@ -4,14 +4,22 @@
 
 use std::collections::HashMap;
 
-const MIN_POSITIONS: u32 = 50;       // need this many before enforcing range
-const MAX_RANGE_KM: f64 = 600.0;     // max plausible receiver range
-const GROWTH_MARGIN_KM: f64 = 50.0;  // allow extent to grow by this much per update
+use serde::{Serialize, Deserialize};
+use std::time::Instant;
 
+const MIN_POSITIONS: u32 = 50;
+const MAX_RANGE_KM: f64 = 600.0;
+const GROWTH_MARGIN_KM: f64 = 50.0;
+const CACHE_FILE: &str = "/var/lib/fa3/receiver_map.json";
+
+#[derive(Serialize, Deserialize)]
 pub struct ReceiverMap {
     receivers: HashMap<u64, ReceiverExtent>,
+    #[serde(skip)]
+    last_persist: Option<Instant>,
 }
 
+#[derive(Serialize, Deserialize)]
 struct ReceiverExtent {
     lat_min: f64,
     lat_max: f64,
@@ -34,7 +42,30 @@ impl ReceiverExtent {
 
 impl ReceiverMap {
     pub fn new() -> Self {
-        Self { receivers: HashMap::with_capacity(4096) }
+        match std::fs::read_to_string(CACHE_FILE) {
+            Ok(data) => {
+                if let Ok(mut map) = serde_json::from_str::<Self>(&data) {
+                    tracing::info!(receivers = map.receivers.len(), "receiver_map: loaded from disk");
+                    map.last_persist = Some(Instant::now());
+                    return map;
+                }
+            }
+            Err(_) => {}
+        }
+        Self { receivers: HashMap::with_capacity(4096), last_persist: Some(Instant::now()) }
+    }
+
+    pub fn persist(&mut self) {
+        let now = Instant::now();
+        if let Some(last) = self.last_persist {
+            if now.duration_since(last).as_secs() < 60 { return; }
+        }
+        self.last_persist = Some(now);
+        let dir = std::path::Path::new(CACHE_FILE).parent().unwrap();
+        std::fs::create_dir_all(dir).ok();
+        if let Ok(data) = serde_json::to_string(self) {
+            std::fs::write(CACHE_FILE, data).ok();
+        }
     }
 
     /// Record a confirmed position for a receiver. Grows the receiver's extent.
