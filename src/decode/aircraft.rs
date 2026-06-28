@@ -114,6 +114,7 @@ pub struct Store {
     pub messages_total: u64,
     pub db: StdHashMap<u32, (String, String)>,
     pub enrichment: crate::enrichment::Enrichment,
+    pub receiver_map: super::receiver_map::ReceiverMap,
 }
 
 impl Store {
@@ -123,6 +124,7 @@ impl Store {
             messages_total: 0,
             db: load_aircraft_db(),
             enrichment: crate::enrichment::Enrichment::new(traffic_api),
+            receiver_map: super::receiver_map::ReceiverMap::new(),
         }
     }
 
@@ -208,7 +210,28 @@ impl Store {
             } else {
                 ac.cpr_even = Some((cpr_lat, cpr_lon, t, rid));
             }
+            let prev_seen = ac.seen_pos;
             self.try_position(msg.icao, t);
+            // Validate against receiver coverage map — revoke if out of range
+            if let Some(ac) = self.map.get_mut(&msg.icao) {
+                if ac.seen_pos > prev_seen {
+                    if let (Some(lat), Some(lon)) = (ac.lat, ac.lon) {
+                        if self.receiver_map.check_position(msg.receiver_id, lat, lon) {
+                            // Confirmed — feed to receiver map for learning
+                            self.receiver_map.position_received(msg.receiver_id, lat, lon);
+                        } else {
+                            // Out of receiver range — revoke position, reset
+                            ac.lat = None;
+                            ac.lon = None;
+                            ac.prev_pos_time = 0.0;
+                            ac.prev_lat = 0.0;
+                            ac.prev_lon = 0.0;
+                            ac.pos_reliable_odd = 0.0;
+                            ac.pos_reliable_even = 0.0;
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -252,17 +275,17 @@ impl Store {
         }
 
         // Global decode: find a per-receiver slot with both even+odd within timeout
-        let mut best: Option<(u32, u32, u32, u32, bool)> = None;
-        for slot in ac.cpr_slots.values() {
+        let mut best: Option<(u32, u32, u32, u32, bool, u64)> = None;
+        for (&rid, slot) in &ac.cpr_slots {
             if let (Some(e), Some(o)) = (slot.even, slot.odd) {
                 if (e.2 - o.2).abs() <= CPR_PAIR_TIMEOUT {
                     let fflag = o.2 > e.2;
-                    best = Some((e.0, e.1, o.0, o.1, fflag));
+                    best = Some((e.0, e.1, o.0, o.1, fflag, rid));
                     break;
                 }
             }
         }
-        let (elat, elon, olat, olon, fflag) = match best {
+        let (elat, elon, olat, olon, fflag, rid) = match best {
             Some(p) => p,
             None => return,
         };

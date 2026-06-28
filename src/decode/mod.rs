@@ -3,3 +3,4 @@ pub mod cpr;
 pub mod mode_s;
 pub mod aircraft;
 pub mod output;
+pub mod receiver_map;
