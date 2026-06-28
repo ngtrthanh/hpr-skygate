@@ -70,4 +70,13 @@ pub struct Config {
     /// AIS TCP sources (format: "name=host:port,name2=host2:port2")
     #[arg(long)]
     pub ais_sources: Option<String>,
+
+    /// RTL-SDR device index for 1090 MHz ADS-B demod
+    #[arg(long)]
+    pub sdr_device: Option<u32>,
+
+    /// RTL-SDR device index for 162 MHz AIS demod
+    #[arg(long)]
+    pub ais_device: Option<u32>,
 }
+
